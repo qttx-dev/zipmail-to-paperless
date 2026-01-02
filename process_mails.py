@@ -68,22 +68,37 @@ def send_email_with_pdf(pdf_content, filename, original_subject):
     part['Content-Disposition'] = f'attachment; filename="{filename}"'
     msg.attach(part)
 
-    try:
-        # SMTP Verbindung aufbauen
-        if SMTP_PORT == 465:
-            server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
-        else:
-            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-            server.starttls() # STARTTLS für Port 587
-            
-        server.login(SMTP_USER, SMTP_PASSWORD)
-        server.sendmail(SMTP_USER, TARGET_EMAIL, msg.as_string())
-        server.quit()
-        print(f"    E-Mail erfolgreich gesendet: {filename}")
-        return True
-    except Exception as e:
-        print(f"    Fehler beim Senden der E-Mail: {e}")
-        return False
+    # Retry Logik
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            # SMTP Verbindung aufbauen
+            if SMTP_PORT == 465:
+                server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
+            else:
+                server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+                server.starttls() # STARTTLS für Port 587
+                
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_USER, TARGET_EMAIL, msg.as_string())
+            server.quit()
+            print(f"    E-Mail erfolgreich gesendet: {filename}")
+            return True
+        except Exception as e:
+            print(f"    Fehler beim Senden (Versuch {attempt}/{max_retries}): {e}")
+            if attempt < max_retries:
+                print("    Warte 60 Sekunden wegen möglichem Rate Limit...")
+                try:
+                    for i in range(60, 0, -1):
+                        print(f"    Warte... {i} \r", end="", flush=True)
+                        time.sleep(1)
+                    print("\n    Neuer Versuch...")
+                except KeyboardInterrupt:
+                    print("\n    Abbruch durch Benutzer.")
+                    return False
+    
+    print(f"    Senden fehlgeschlagen nach {max_retries} Versuchen.")
+    return False
 
 def process_emails():
     print("Prüfe auf neue E-Mails (Python)...")

@@ -47,42 +47,65 @@ for MAIL_UID in $UIDS; do
     # munpack Output unterdrücken, wir prüfen gleich selbst auf ZIPs
     munpack -q "email.eml" > /dev/null 2>&1
     
-    # Filter prüfen (Absender/Betreff)
-    if [ -n "$FILTER_SENDER" ]; then
-        if ! grep -q "From: .*$FILTER_SENDER" "email.eml"; then
-            echo "  Überspringe: Absender passt nicht zum Filter."
-            cd "$SCRIPT_DIR"
-            continue
-        fi
-    fi
-    if [ -n "$FILTER_SUBJECT" ]; then
-        if ! grep -q "Subject: .*$FILTER_SUBJECT" "email.eml"; then
-            echo "  Überspringe: Betreff passt nicht zum Filter."
-            cd "$SCRIPT_DIR"
-            continue
-        fi
-    fi
+    echo "DEBUG: Inhalt des Verzeichnisses nach munpack:"
+    ls -l
 
-    pdf_found=false
+    # Versuche, seltsame Dateinamen zu reparieren oder ZIPs zu erkennen
+    # Gehe alle Dateien durch, die nicht email.eml sind
+    for f in *; do
+        if [ "$f" = "email.eml" ]; then continue; fi
+        
+        # Prüfe mit 'file' Kommando, ob es ein ZIP ist (falls 'file' installiert ist)
+        if command -v file &> /dev/null; then
+            if file -b --mime-type "$f" | grep -q "application/zip"; then
+                echo "  Datei '$f' als ZIP erkannt (MIME-Type Check)."
+                mv "$f" "attachment_$(date +%s).zip"
+            fi
+        else
+             # Fallback: Wenn der Dateiname '.zip' (auch kodiert) enthält oder wir es einfach probieren wollen
+             # Manche munpack Versionen erzeugen Dateinamen wie =...=2Ezip
+             if [[ "$f" == *"=2Ezip"* ]] || [[ "$f" == *"=2EZIP"* ]]; then
+                 echo "  Datei '$f' scheint ein kodiertes ZIP zu sein."
+                 mv "$f" "attachment_$(date +%s).zip"
+             fi
+        fi
+    done
+    
     # Prüfe auf ZIP Dateien
     shopt -s nullglob
-    for zipfile in *.zip *.ZIP; do
+    zip_files=(*.zip *.ZIP)
+    if [ ${#zip_files[@]} -eq 0 ]; then
+        echo "  Keine ZIP-Dateien in dieser E-Mail gefunden."
+    fi
+
+    for zipfile in "${zip_files[@]}"; do
         if [ -f "$zipfile" ]; then
             echo "  ZIP gefunden: $zipfile"
             # 4. ZIP entpacken
             unzip -q -o "$zipfile" -d "extracted"
             
             # 5. Nach PDFs suchen und senden
-            for pdffile in extracted/*.pdf extracted/*.PDF; do
+            shopt -s nullglob
+            pdf_files=(extracted/*.pdf extracted/*.PDF)
+            if [ ${#pdf_files[@]} -eq 0 ]; then
+                echo "    Keine PDF-Dateien im ZIP gefunden."
+            fi
+
+            for pdffile in "${pdf_files[@]}"; do
                 if [ -f "$pdffile" ]; then
                     FILENAME=$(basename "$pdffile")
                     echo "    PDF gefunden: $FILENAME - Sende an $TARGET_EMAIL..."
                     
                     # 6. Senden via curl (SMTP)
                     BOUNDARY="NextPart_$(date +%s)"
+                    CURRENT_DATE=$(date -R)
+                    MSG_ID="<$(date +%s).$RANDOM@$SMTP_SERVER>"
+                    
                     (
-                    echo "From: $SMTP_USER"
+                    echo "Date: $CURRENT_DATE"
+                    echo "From: ZipMail Bot <$SMTP_USER>"
                     echo "To: $TARGET_EMAIL"
+                    echo "Message-ID: $MSG_ID"
                     echo "Subject: Extracted PDF: $FILENAME"
                     echo "MIME-Version: 1.0"
                     echo "Content-Type: multipart/mixed; boundary=\"$BOUNDARY\""
@@ -90,7 +113,7 @@ for MAIL_UID in $UIDS; do
                     echo "--$BOUNDARY"
                     echo "Content-Type: text/plain; charset=utf-8"
                     echo ""
-                    echo "Automatisch extrahiertes PDF."
+                    echo "Automatisch extrahiertes PDF: $FILENAME"
                     echo ""
                     echo "--$BOUNDARY"
                     echo "Content-Type: application/pdf"
@@ -102,17 +125,43 @@ for MAIL_UID in $UIDS; do
                     echo "--$BOUNDARY--"
                     ) > "mail_to_send.txt"
                     
-                    curl --url "smtps://$SMTP_SERVER:$SMTP_PORT" \
-                         --ssl-reqd \
-                         --mail-from "$SMTP_USER" \
-                         --mail-rcpt "$TARGET_EMAIL" \
-                         --user "$SMTP_USER:$SMTP_PASSWORD" \
-                         --upload-file "mail_to_send.txt" --silent
-                         
-                    if [ $? -eq 0 ]; then
-                        echo "    Erfolgreich gesendet."
-                        pdf_found=true
-                    fi
+                    # Retry-Logik für den Versand
+                    MAX_RETRIES=3
+                    RETRY_COUNT=0
+                    SENT_SUCCESS=false
+
+                    while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+                        # Debug: SMTP Versand mit Fehlerausgabe
+                        curl --url "smtp://$SMTP_SERVER:$SMTP_PORT" \
+                             --ssl-reqd \
+                             --mail-from "$SMTP_USER" \
+                             --mail-rcpt "$TARGET_EMAIL" \
+                             --user "$SMTP_USER:$SMTP_PASSWORD" \
+                             --upload-file "mail_to_send.txt" --show-error --fail
+                             
+                        EXIT_CODE=$?
+                        
+                        if [ $EXIT_CODE -eq 0 ]; then
+                            echo "    Erfolgreich gesendet."
+                            pdf_found=true
+                            SENT_SUCCESS=true
+                            break
+                        else
+                            echo "    Fehler beim Senden (Curl Exit Code: $EXIT_CODE)."
+                            RETRY_COUNT=$((RETRY_COUNT+1))
+                            
+                            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                                echo "    Rate Limit oder Server-Fehler vermutet. Warte 60 Sekunden vor Versuch $RETRY_COUNT von $MAX_RETRIES..."
+                                for i in {60..1}; do
+                                    echo -ne "    Warte... $i \r"
+                                    sleep 1
+                                done
+                                echo -e "\n    Neuer Versuch..."
+                            else
+                                echo "    Gabe nach $MAX_RETRIES Versuchen auf."
+                            fi
+                        fi
+                    done
                 fi
             done
         fi
