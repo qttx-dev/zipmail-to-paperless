@@ -54,9 +54,6 @@ for MAIL_UID in $UIDS; do
     cd "$MAIL_DIR"
     # munpack Output unterdrücken, wir prüfen gleich selbst auf ZIPs
     munpack -q "email.eml" > /dev/null 2>&1
-    
-    echo "DEBUG: Inhalt des Verzeichnisses nach munpack:"
-    ls -l
 
     # Versuche, seltsame Dateinamen zu reparieren oder ZIPs zu erkennen
     # Gehe alle Dateien durch, die nicht email.eml sind
