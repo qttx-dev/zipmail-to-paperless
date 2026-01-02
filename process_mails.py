@@ -4,15 +4,19 @@ import email
 import zipfile
 import os
 import io
+import time
+import uuid
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
+from email.header import decode_header
+from email.utils import formatdate, make_msgid
 from dotenv import load_dotenv
 
 # Umgebungsvariablen laden
 load_dotenv()
 
-# Konfiguration aus .envDatei
+# Konfiguration
 IMAP_SERVER = os.getenv('IMAP_SERVER')
 IMAP_PORT = int(os.getenv('IMAP_PORT', 993))
 IMAP_USER = os.getenv('IMAP_USER')
@@ -29,79 +33,147 @@ DELETE_AFTER_PROCESSING = os.getenv('DELETE_AFTER_PROCESSING', 'false').lower() 
 FILTER_SENDER = os.getenv('FILTER_SENDER', '').lower()
 FILTER_SUBJECT = os.getenv('FILTER_SUBJECT', '').lower()
 
-def connect_imap():
-...
-    for email_id in email_ids:
-        res, msg_data = mail.fetch(email_id, '(RFC822)')
-        raw_email = msg_data[0][1]
-        msg = email.message_from_bytes(raw_email)
-        
-        # Absender prüfen
-        sender = msg.get("From", "").lower()
-        if FILTER_SENDER and FILTER_SENDER not in sender:
-            print(f"Überspringe Mail: Absender '{sender}' passt nicht zu Filter '{FILTER_SENDER}'")
-            continue
-
-        subject_header = email.header.decode_header(msg["Subject"])[0][0]
-        if isinstance(subject_header, bytes):
-            subject = subject_header.decode()
+def decode_mime_header(header_value):
+    """Dekodiert MIME-Header (Subject, Filename) sicher."""
+    if not header_value:
+        return ""
+    decoded_list = decode_header(header_value)
+    result = ""
+    for content, encoding in decoded_list:
+        if encoding:
+            try:
+                result += content.decode(encoding)
+            except:
+                result += content.decode('utf-8', errors='ignore')
+        elif isinstance(content, bytes):
+            result += content.decode('utf-8', errors='ignore')
         else:
-            subject = subject_header
+            result += str(content)
+    return result
+
+def send_email_with_pdf(pdf_content, filename, original_subject):
+    """Sendet das PDF per SMTP."""
+    msg = MIMEMultipart()
+    msg['From'] = f"ZipMail Bot <{SMTP_USER}>"
+    msg['To'] = TARGET_EMAIL
+    msg['Subject'] = f"Extracted PDF: {filename}"
+    msg['Date'] = formatdate(localtime=True)
+    msg['Message-ID'] = make_msgid(domain=SMTP_SERVER)
+
+    body = f"Automatisch extrahiertes PDF: {filename}\nUrsprünglicher Betreff: {original_subject}"
+    msg.attach(MIMEText(body, 'plain', 'utf-8'))
+
+    # PDF Anhang
+    part = MIMEApplication(pdf_content, Name=filename)
+    part['Content-Disposition'] = f'attachment; filename="{filename}"'
+    msg.attach(part)
+
+    try:
+        # SMTP Verbindung aufbauen
+        if SMTP_PORT == 465:
+            server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
+        else:
+            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+            server.starttls() # STARTTLS für Port 587
+            
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        server.sendmail(SMTP_USER, TARGET_EMAIL, msg.as_string())
+        server.quit()
+        print(f"    E-Mail erfolgreich gesendet: {filename}")
+        return True
+    except Exception as e:
+        print(f"    Fehler beim Senden der E-Mail: {e}")
+        return False
+
+def process_emails():
+    print("Prüfe auf neue E-Mails (Python)...")
+    
+    try:
+        # IMAP Verbindung
+        mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
+        mail.login(IMAP_USER, IMAP_PASSWORD)
+        mail.select(SOURCE_FOLDER)
         
-        # Betreff prüfen
-        if FILTER_SUBJECT and FILTER_SUBJECT not in subject.lower():
-            print(f"Überspringe Mail: Betreff '{subject}' passt nicht zu Filter '{FILTER_SUBJECT}'")
-            continue
+        status, messages = mail.search(None, 'UNSEEN')
+        email_ids = messages[0].split()
+        
+        if not email_ids:
+            print("Keine neuen E-Mails.")
+            mail.close()
+            mail.logout()
+            return
 
-        print(f"Verarbeite E-Mail: {subject}")
-        pdf_found = False
+        for email_id in email_ids:
+            # Fetch E-Mail
+            status, msg_data = mail.fetch(email_id, '(RFC822)')
+            raw_email = msg_data[0][1]
+            msg = email.message_from_bytes(raw_email)
+            
+            # Subjekt und Sender dekodieren
+            subject = decode_mime_header(msg["Subject"])
+            sender = decode_mime_header(msg.get("From"))
+            
+            print(f"Verarbeite Mail ID {email_id.decode()}: {subject}")
 
-        # Durchlaufe alle Teile der E-Mail
-        for part in msg.walk():
-            if part.get_content_maintype() == 'multipart':
+            # Filter prüfen
+            if FILTER_SENDER and FILTER_SENDER not in sender.lower():
+                print(f"  Überspringe: Absender '{sender}' passt nicht.")
                 continue
-            if part.get('Content-Disposition') is None:
+            if FILTER_SUBJECT and FILTER_SUBJECT not in subject.lower():
+                print(f"  Überspringe: Betreff '{subject}' passt nicht.")
                 continue
 
-            filename = part.get_filename()
-            if filename and filename.lower().endswith('.zip'):
-                print(f"ZIP-Anhang gefunden: {filename}")
+            pdf_found = False
+
+            # Anhänge durchsuchen
+            for part in msg.walk():
+                if part.get_content_maintype() == 'multipart':
+                    continue
+                if part.get('Content-Disposition') is None:
+                    continue
+
+                filename = decode_mime_header(part.get_filename())
                 
-                # ZIP Dateiinhalt lesen
-                zip_data = part.get_payload(decode=True)
-                
-                try:
-                    with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
-                        for zip_info in z.infolist():
-                            if zip_info.filename.lower().endswith('.pdf') and not zip_info.is_dir():
-                                print(f"PDF im ZIP entdeckt: {zip_info.filename}")
-                                
-                                # PDF extrahieren
-                                with z.open(zip_info) as pdf_file:
-                                    pdf_content = pdf_file.read()
+                # Check auf ZIP (auch wenn Name komisch kodiert war)
+                if filename and (filename.lower().endswith('.zip') or part.get_content_type() == 'application/zip'):
+                    print(f"  ZIP gefunden: {filename}")
+                    
+                    try:
+                        zip_data = part.get_payload(decode=True)
+                        if not zip_data:
+                            print("    Warnung: Leerer ZIP-Inhalt.")
+                            continue
+
+                        with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
+                            for zip_info in z.infolist():
+                                if zip_info.filename.lower().endswith('.pdf') and not zip_info.is_dir():
+                                    print(f"    PDF im ZIP entdeckt: {zip_info.filename}")
                                     
-                                    # PDF senden
-                                    # Bereinige Dateinamen (keine Pfade)
-                                    clean_filename = os.path.basename(zip_info.filename)
-                                    if send_email_with_pdf(pdf_content, clean_filename, subject):
-                                        pdf_found = True
-                except zipfile.BadZipFile:
-                    print(f"Fehler: Datei {filename} ist kein gültiges ZIP-Archiv.")
+                                    with z.open(zip_info) as pdf_file:
+                                        pdf_content = pdf_file.read()
+                                        clean_filename = os.path.basename(zip_info.filename)
+                                        
+                                        if send_email_with_pdf(pdf_content, clean_filename, subject):
+                                            pdf_found = True
+                    except zipfile.BadZipFile:
+                        print(f"    Fehler: Ungültiges ZIP-Archiv.")
+                    except Exception as e:
+                        print(f"    Fehler beim Verarbeiten des ZIPs: {e}")
 
-        # Optional: E-Mail nach Verarbeitung löschen oder markieren
-        if pdf_found and DELETE_AFTER_PROCESSING:
-            mail.store(email_id, '+FLAGS', '\Deleted')
-            print("Ursprüngliche E-Mail zum Löschen markiert.")
+            # Löschen/Aufräumen
+            if pdf_found and DELETE_AFTER_PROCESSING:
+                print(f"  Lösche E-Mail ID {email_id.decode()}...")
+                mail.store(email_id, '+FLAGS', '\Deleted')
         
-    if DELETE_AFTER_PROCESSING:
-        mail.expunge()
-        
-    mail.close()
-    mail.logout()
-    print("Fertig.")
+        if DELETE_AFTER_PROCESSING:
+            mail.expunge()
+            
+        mail.close()
+        mail.logout()
+        print("Fertig.")
+
+    except Exception as e:
+        print(f"Ein Fehler ist aufgetreten: {e}")
 
 if __name__ == "__main__":
-    try:
-        process_emails()
-    except Exception as e:
-        print(f"Ein unerwarteter Fehler ist aufgetreten: {e}")
+    process_emails()
