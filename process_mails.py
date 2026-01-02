@@ -118,79 +118,80 @@ def process_emails():
                 
                 # IMAP Search erwartet Criteria als String oder Argumente
                 # Wir nutzen hier den charset Parameter 'None' und joinen die Criteria
-                search_string = f'({" ".join(search_criteria)})'
-                print(f"Suche nach E-Mails: {search_string}")
+        search_string = f'({" ".join(search_criteria)})'
+        print(f"Suche nach E-Mails (UID SEARCH): {search_string}")
+        
+        # WICHTIG: UID Search verwenden
+        status, messages = mail.uid('search', None, *search_criteria)
+        email_ids = messages[0].split()
+        
+        if not email_ids:
+            print("Keine neuen E-Mails.")
+            mail.close()
+            mail.logout()
+            return
+
+        for email_id in email_ids:
+            # Fetch E-Mail via UID
+            status, msg_data = mail.uid('fetch', email_id, '(RFC822)')
+            raw_email = msg_data[0][1]
+            msg = email.message_from_bytes(raw_email)
+            
+            # Subjekt und Sender dekodieren
+            subject = decode_mime_header(msg["Subject"])
+            sender = decode_mime_header(msg.get("From"))
+            
+            print(f"Verarbeite Mail UID {email_id.decode()}: {subject}")
+
+            # (Filter hier nicht mehr nötig, da im SEARCH)
+            
+            pdf_found = False
+            send_failed = False
+
+            # Anhänge durchsuchen
+            for part in msg.walk():
+                if part.get_content_maintype() == 'multipart':
+                    continue
+                if part.get('Content-Disposition') is None:
+                    continue
+
+                filename = decode_mime_header(part.get_filename())
                 
-                status, messages = mail.search(None, *search_criteria)
-                email_ids = messages[0].split()
-                
-                if not email_ids:
-                    print("Keine neuen E-Mails.")
-                    mail.close()
-                    mail.logout()
-                    return
-        
-                for email_id in email_ids:
-                    # Fetch E-Mail
-                    status, msg_data = mail.fetch(email_id, '(RFC822)')
-                    raw_email = msg_data[0][1]
-                    msg = email.message_from_bytes(raw_email)
+                # Check auf ZIP (auch wenn Name komisch kodiert war)
+                if filename and (filename.lower().endswith('.zip') or part.get_content_type() == 'application/zip'):
+                    print(f"  ZIP gefunden: {filename}")
                     
-                    # Subjekt und Sender dekodieren
-                    subject = decode_mime_header(msg["Subject"])
-                    sender = decode_mime_header(msg.get("From"))
-                    
-                    print(f"Verarbeite Mail ID {email_id.decode()}: {subject}")
-        
-                    # (Filter hier nicht mehr nötig, da im SEARCH)
-                    
-                    pdf_found = False
-                    send_failed = False
-        
-                    # Anhänge durchsuchen
-                    for part in msg.walk():
-                        if part.get_content_maintype() == 'multipart':
+                    try:
+                        zip_data = part.get_payload(decode=True)
+                        if not zip_data:
+                            print("    Warnung: Leerer ZIP-Inhalt.")
                             continue
-                        if part.get('Content-Disposition') is None:
-                            continue
-        
-                        filename = decode_mime_header(part.get_filename())
-                        
-                        # Check auf ZIP (auch wenn Name komisch kodiert war)
-                        if filename and (filename.lower().endswith('.zip') or part.get_content_type() == 'application/zip'):
-                            print(f"  ZIP gefunden: {filename}")
-                            
-                            try:
-                                zip_data = part.get_payload(decode=True)
-                                if not zip_data:
-                                    print("    Warnung: Leerer ZIP-Inhalt.")
-                                    continue
-        
-                                with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
-                                    for zip_info in z.infolist():
-                                        if zip_info.filename.lower().endswith('.pdf') and not zip_info.is_dir():
-                                            print(f"    PDF im ZIP entdeckt: {zip_info.filename}")
-                                            
-                                            with z.open(zip_info) as pdf_file:
-                                                pdf_content = pdf_file.read()
-                                                clean_filename = os.path.basename(zip_info.filename)
-                                                
-                                                if send_email_with_pdf(pdf_content, clean_filename, subject):
-                                                    pdf_found = True
-                                                else:
-                                                    # Senden fehlgeschlagen (trotz Retries)
-                                                    send_failed = True
-                            except zipfile.BadZipFile:
-                                print(f"    Fehler: Ungültiges ZIP-Archiv.")
-                            except Exception as e:
-                                print(f"    Fehler beim Verarbeiten des ZIPs: {e}")
-        
-                    if send_failed:
-                        print(f"  Warnung: Verarbeitung für ID {email_id.decode()} fehlgeschlagen. Markiere als UNGELESEN für Retry.")
-                        mail.store(email_id, '-FLAGS', '\Seen')
-                    elif pdf_found and DELETE_AFTER_PROCESSING:
-                        print(f"  Lösche E-Mail ID {email_id.decode()}...")
-                        mail.store(email_id, '+FLAGS', '\Deleted')        
+
+                        with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
+                            for zip_info in z.infolist():
+                                if zip_info.filename.lower().endswith('.pdf') and not zip_info.is_dir():
+                                    print(f"    PDF im ZIP entdeckt: {zip_info.filename}")
+                                    
+                                    with z.open(zip_info) as pdf_file:
+                                        pdf_content = pdf_file.read()
+                                        clean_filename = os.path.basename(zip_info.filename)
+                                        
+                                        if send_email_with_pdf(pdf_content, clean_filename, subject):
+                                            pdf_found = True
+                                        else:
+                                            # Senden fehlgeschlagen (trotz Retries)
+                                            send_failed = True
+                    except zipfile.BadZipFile:
+                        print(f"    Fehler: Ungültiges ZIP-Archiv.")
+                    except Exception as e:
+                        print(f"    Fehler beim Verarbeiten des ZIPs: {e}")
+
+            if send_failed:
+                print(f"  Warnung: Verarbeitung für UID {email_id.decode()} fehlgeschlagen. Markiere als UNGELESEN für Retry.")
+                mail.uid('store', email_id, '-FLAGS', '\Seen')
+            elif pdf_found and DELETE_AFTER_PROCESSING:
+                print(f"  Lösche E-Mail UID {email_id.decode()}...")
+                mail.uid('store', email_id, '+FLAGS', '\Deleted')        
         if DELETE_AFTER_PROCESSING:
             mail.expunge()
             

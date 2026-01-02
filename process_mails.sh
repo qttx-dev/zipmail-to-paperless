@@ -15,7 +15,8 @@ mkdir -p "$TMP_DIR"
 
 # 1. Liste ungelesener Mails abrufen (UIDs)
 # Suchkriterien aufbauen
-SEARCH_QUERY="SEARCH UNSEEN"
+# WICHTIG: "UID SEARCH" verwenden, damit wir echte UIDs bekommen (nicht Sequenznummern)
+SEARCH_QUERY="UID SEARCH UNSEEN"
 if [ -n "$FILTER_SENDER" ]; then
     SEARCH_QUERY="$SEARCH_QUERY FROM \"$FILTER_SENDER\""
 fi
