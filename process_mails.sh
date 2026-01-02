@@ -14,9 +14,17 @@ TMP_DIR="$SCRIPT_DIR/tmp_processing"
 mkdir -p "$TMP_DIR"
 
 # 1. Liste ungelesener Mails abrufen (UIDs)
-# curl gibt oft Text zurück wie "* SEARCH 1 2 3", wir brauchen nur die Zahlen
-echo "Prüfe auf neue E-Mails..."
-SEARCH_RESULT=$(curl --url "imaps://$IMAP_SERVER/$SOURCE_FOLDER" --user "$IMAP_USER:$IMAP_PASSWORD" -X "SEARCH UNSEEN" --silent)
+# Suchkriterien aufbauen
+SEARCH_QUERY="SEARCH UNSEEN"
+if [ -n "$FILTER_SENDER" ]; then
+    SEARCH_QUERY="$SEARCH_QUERY FROM \"$FILTER_SENDER\""
+fi
+if [ -n "$FILTER_SUBJECT" ]; then
+    SEARCH_QUERY="$SEARCH_QUERY SUBJECT \"$FILTER_SUBJECT\""
+fi
+
+echo "Prüfe auf neue E-Mails (Query: $SEARCH_QUERY)..."
+SEARCH_RESULT=$(curl --url "imaps://$IMAP_SERVER/$SOURCE_FOLDER" --user "$IMAP_USER:$IMAP_PASSWORD" -X "$SEARCH_QUERY" --silent)
 
 # Extrahiere UIDs (Alles nach "SEARCH" greifen)
 UIDS=$(echo "$SEARCH_RESULT" | grep -oP '(?<=SEARCH ).*' | tr -d '\r' | xargs)
@@ -74,6 +82,8 @@ for MAIL_UID in $UIDS; do
     # Prüfe auf ZIP Dateien
     shopt -s nullglob
     zip_files=(*.zip *.ZIP)
+    pdf_found=false
+    
     if [ ${#zip_files[@]} -eq 0 ]; then
         echo "  Keine ZIP-Dateien in dieser E-Mail gefunden."
     fi
@@ -159,6 +169,12 @@ for MAIL_UID in $UIDS; do
                                 echo -e "\n    Neuer Versuch..."
                             else
                                 echo "    Gabe nach $MAX_RETRIES Versuchen auf."
+                                # WICHTIG: Mail wieder als ungelesen markieren, damit wir es später nochmal versuchen
+                                echo "    Markiere Mail UID $MAIL_UID wieder als UNGELESEN (für Retry)..."
+                                curl --url "imaps://$IMAP_SERVER/$SOURCE_FOLDER" \
+                                     --user "$IMAP_USER:$IMAP_PASSWORD" \
+                                     -X "STORE $MAIL_UID -FLAGS (\Seen)" --silent
+                                pdf_found=false 
                             fi
                         fi
                     done
@@ -168,6 +184,7 @@ for MAIL_UID in $UIDS; do
     done
 
     # 7. Löschen falls konfiguriert
+    # Nur wenn PDF gefunden wurde und Versand erfolgreich war (impliziert durch pdf_found=true)
     if [ "$pdf_found" = true ] && [ "$DELETE_AFTER_PROCESSING" = "true" ]; then
         echo "  Lösche E-Mail UID $MAIL_UID vom Server..."
         curl --url "imaps://$IMAP_SERVER/$SOURCE_FOLDER" \
