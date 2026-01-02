@@ -19,7 +19,7 @@ echo "Prüfe auf neue E-Mails..."
 SEARCH_RESULT=$(curl --url "imaps://$IMAP_SERVER/$SOURCE_FOLDER" --user "$IMAP_USER:$IMAP_PASSWORD" -X "SEARCH UNSEEN" --silent)
 
 # Extrahiere UIDs (Alles nach "SEARCH" greifen)
-UIDS=$(echo "$SEARCH_RESULT" | grep -oP '(?<=SEARCH ).*')
+UIDS=$(echo "$SEARCH_RESULT" | grep -oP '(?<=SEARCH ).*' | tr -d '\r' | xargs)
 
 if [ -z "$UIDS" ]; then
     echo "Keine neuen E-Mails."
@@ -27,18 +27,25 @@ if [ -z "$UIDS" ]; then
     exit 0
 fi
 
-for UID in $UIDS; do
-    echo "Verarbeite Mail UID: $UID"
+for MAIL_UID in $UIDS; do
+    echo "Verarbeite Mail UID: $MAIL_UID"
     
-    MAIL_DIR="$TMP_DIR/$UID"
+    MAIL_DIR="$TMP_DIR/$MAIL_UID"
     mkdir -p "$MAIL_DIR"
     
     # 2. Mail herunterladen
-    curl --url "imaps://$IMAP_SERVER/$SOURCE_FOLDER;UID=$UID" --user "$IMAP_USER:$IMAP_PASSWORD" --silent > "$MAIL_DIR/email.eml"
+    # --fail damit curl bei Serverfehlern einen Exit-Code != 0 liefert
+    curl --url "imaps://$IMAP_SERVER/$SOURCE_FOLDER;UID=$MAIL_UID" --user "$IMAP_USER:$IMAP_PASSWORD" --silent --show-error --fail > "$MAIL_DIR/email.eml"
+    
+    if [ ! -s "$MAIL_DIR/email.eml" ]; then
+        echo "  Warnung: E-Mail konnte nicht heruntergeladen werden oder ist leer."
+        continue
+    fi
     
     # 3. Anhänge extrahieren (munpack speichert im aktuellen Verzeichnis)
     cd "$MAIL_DIR"
-    munpack -q "email.eml"
+    # munpack Output unterdrücken, wir prüfen gleich selbst auf ZIPs
+    munpack -q "email.eml" > /dev/null 2>&1
     
     # Filter prüfen (Absender/Betreff)
     if [ -n "$FILTER_SENDER" ]; then
@@ -113,10 +120,10 @@ for UID in $UIDS; do
 
     # 7. Löschen falls konfiguriert
     if [ "$pdf_found" = true ] && [ "$DELETE_AFTER_PROCESSING" = "true" ]; then
-        echo "  Lösche E-Mail UID $UID vom Server..."
+        echo "  Lösche E-Mail UID $MAIL_UID vom Server..."
         curl --url "imaps://$IMAP_SERVER/$SOURCE_FOLDER" \
              --user "$IMAP_USER:$IMAP_PASSWORD" \
-             -X "STORE $UID +FLAGS (\Deleted)" --silent
+             -X "STORE $MAIL_UID +FLAGS (\Deleted)" --silent
         curl --url "imaps://$IMAP_SERVER/$SOURCE_FOLDER" \
              --user "$IMAP_USER:$IMAP_PASSWORD" \
              -X "EXPUNGE" --silent
